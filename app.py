@@ -1,21 +1,17 @@
 from fastapi import FastAPI, UploadFile, File
 import tempfile
 import os
+import zipfile
 
 app = FastAPI()
 
-
 @app.get("/")
 def home():
-    return {
-        "status": "ok"
-    }
-
+    return {"status": "ok"}
 
 @app.get("/health")
 def health():
     return "running"
-
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
@@ -25,10 +21,17 @@ async def upload(file: UploadFile = File(...)):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
 
     tmp.write(await file.read())
-
     tmp.close()
 
-    return {
+    result = {
         "filename": file.filename,
-        "saved": tmp.name
+        "isZip": zipfile.is_zipfile(tmp.name)
     }
+
+    if result["isZip"]:
+        with zipfile.ZipFile(tmp.name) as z:
+            result["files"] = z.namelist()
+
+    os.remove(tmp.name)
+
+    return result
