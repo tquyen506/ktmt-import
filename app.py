@@ -1,37 +1,59 @@
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse
 import tempfile
 import os
 import zipfile
 
 app = FastAPI()
 
+
 @app.get("/")
 def home():
     return {"status": "ok"}
 
-@app.get("/health")
-def health():
-    return "running"
 
-@app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+@app.post("/extract")
+async def extract(file: UploadFile = File(...)):
 
-    suffix = os.path.splitext(file.filename)[1]
+    tmpdir = tempfile.mkdtemp()
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    zip_path = os.path.join(tmpdir, file.filename)
 
-    tmp.write(await file.read())
-    tmp.close()
+    with open(zip_path, "wb") as f:
+        f.write(await file.read())
 
-    result = {
-        "filename": file.filename,
-        "isZip": zipfile.is_zipfile(tmp.name)
-    }
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(tmpdir)
 
-    if result["isZip"]:
-        with zipfile.ZipFile(tmp.name) as z:
-            result["files"] = z.namelist()
+    target = None
 
-    os.remove(tmp.name)
+    keywords = [
+        "ktmt",
+        "kiểm tra",
+        "mục tiêu",
+        "lịch ktmt"
+    ]
 
-    return result
+    for root, dirs, files in os.walk(tmpdir):
+
+        for f in files:
+
+            name = f.lower()
+
+            if (
+                (name.endswith(".doc") or name.endswith(".docx"))
+                and any(k in name for k in keywords)
+            ):
+                target = os.path.join(root, f)
+                break
+
+        if target:
+            break
+
+    if target is None:
+        return {"error": "Không tìm thấy file KTMT"}
+
+    return FileResponse(
+        target,
+        filename=os.path.basename(target)
+    )
