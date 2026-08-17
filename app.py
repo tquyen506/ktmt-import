@@ -1,26 +1,26 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import FileResponse, JSONResponse
 import tempfile
 import zipfile
 import os
-import shutil
-import unicodedata
 import re
+import unicodedata
+
 
 app = FastAPI()
 
 
 # =========================================================
-# CHUẨN HÓA TÊN
+# CHUẨN HÓA TIẾNG VIỆT
 # =========================================================
 
 def normalize_text(text):
+
     if not text:
         return ""
 
     text = str(text).lower()
 
-    # Bỏ dấu tiếng Việt
     text = unicodedata.normalize("NFD", text)
 
     text = "".join(
@@ -28,11 +28,13 @@ def normalize_text(text):
         if unicodedata.category(c) != "Mn"
     )
 
-    # đ -> d
     text = text.replace("đ", "d")
 
-    # Ký tự đặc biệt -> khoảng trắng
-    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        text
+    )
 
     return " ".join(text.split())
 
@@ -52,7 +54,7 @@ def is_word_file(filename):
 
 
 # =========================================================
-# TÌM TOÀN BỘ FILE WORD TRONG ZIP
+# TÌM TẤT CẢ FILE WORD
 # =========================================================
 
 def find_word_files(tmp_dir):
@@ -86,30 +88,90 @@ def find_word_files(tmp_dir):
 
 
 # =========================================================
-# TÌM FILE LỊCH KIỂM TRA
+# CHẤM ĐIỂM FILE KTMT
+# =========================================================
+
+def score_ktmt(item):
+
+    text = normalize_text(
+        item["relative"]
+    )
+
+    score = 0
+
+    if "lich ktmt" in text:
+        score += 1000
+
+    if "lich kiem tra" in text:
+        score += 900
+
+    if "ktmt" in text:
+        score += 800
+
+    if "kiem tra" in text:
+        score += 700
+
+    return score
+
+
+# =========================================================
+# CHẤM ĐIỂM FILE CÁN BỘ TRỰC
+# =========================================================
+
+def score_canbo(item):
+
+    text = normalize_text(
+        item["relative"]
+    )
+
+    score = 0
+
+    if "lich cong tac tuan" in text:
+        score += 1000
+
+    if "lich cong tac" in text:
+        score += 900
+
+    if "cong tac tuan" in text:
+        score += 800
+
+    if "can bo truc" in text:
+        score += 1000
+
+    if "can bo" in text:
+        score += 700
+
+    if "truc" in text:
+        score += 500
+
+    return score
+
+
+# =========================================================
+# TÌM FILE KTMT
 # =========================================================
 
 def find_ktmt_file(word_files):
 
-    # Ưu tiên file có KTMT
+    if not word_files:
+        return None
+
+    scored = []
+
     for item in word_files:
 
-        name = normalize_text(
-            item["filename"]
-        )
+        scored.append({
+            **item,
+            "score": score_ktmt(item)
+        })
 
-        if "ktmt" in name:
-            return item
+    scored.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
 
-    # Nếu không có KTMT thì thử "kiem tra"
-    for item in word_files:
-
-        name = normalize_text(
-            item["filename"]
-        )
-
-        if "kiem tra" in name:
-            return item
+    if scored[0]["score"] > 0:
+        return scored[0]
 
     return None
 
@@ -120,51 +182,70 @@ def find_ktmt_file(word_files):
 
 def find_canbo_file(word_files):
 
-    # Với ZIP hiện tại của bạn:
+    if not word_files:
+        return None
+
+    scored = []
+
+    for item in word_files:
+
+        scored.append({
+            **item,
+            "score": score_canbo(item)
+        })
+
+    scored.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    if scored[0]["score"] > 0:
+        return scored[0]
+
+    # -----------------------------------------------------
+    # FALLBACK
     #
-    # lịch công tác tuần từ 03.8 đến 09.8.2026.doc
+    # ZIP của bạn hiện có đúng 2 file Word:
     #
-    # Đây chính là file cán bộ trực.
+    # 1. Lịch công tác tuần...
+    # 2. LỊCH KTMT...
     #
+    # Nếu tên thay đổi thì lấy file Word còn lại
+    # sau khi loại file KTMT.
+    # -----------------------------------------------------
 
-    for item in word_files:
+    ktmt = find_ktmt_file(word_files)
 
-        name = normalize_text(
-            item["filename"]
+    if ktmt:
+
+        for item in word_files:
+
+            if item["path"] != ktmt["path"]:
+
+                return item
+
+    return None
+
+
+# =========================================================
+# TÌM FILE THEO KIND
+# =========================================================
+
+def find_target_file(word_files, kind):
+
+    kind = normalize_text(kind)
+
+    if kind == "ktmt":
+
+        return find_ktmt_file(
+            word_files
         )
 
-        if "lich cong tac tuan" in name:
-            return item
+    if kind == "canbo":
 
-    # Trường hợp tên file khác nhưng có "cong tac"
-    for item in word_files:
-
-        name = normalize_text(
-            item["filename"]
+        return find_canbo_file(
+            word_files
         )
-
-        if "cong tac" in name:
-            return item
-
-    # Trường hợp có "can bo truc"
-    for item in word_files:
-
-        name = normalize_text(
-            item["filename"]
-        )
-
-        if "can bo truc" in name:
-            return item
-
-    # Trường hợp có "lich truc"
-    for item in word_files:
-
-        name = normalize_text(
-            item["filename"]
-        )
-
-        if "lich truc" in name:
-            return item
 
     return None
 
@@ -179,7 +260,7 @@ def home():
     return {
         "status": "ok",
         "service": "KTMT Import",
-        "message": "Service is running"
+        "message": "KTMT Import service is running"
     }
 
 
@@ -196,11 +277,9 @@ def health():
 
 
 # =========================================================
-# DEBUG ZIP
+# LIST ZIP
 #
-# POST /list
-#
-# Dùng để xem ZIP có những file gì
+# Dùng để kiểm tra ZIP có những file gì
 # =========================================================
 
 @app.post("/list")
@@ -208,9 +287,7 @@ async def list_zip(
     file: UploadFile = File(...)
 ):
 
-    tmp_dir = tempfile.mkdtemp(
-        prefix="ktmt_list_"
-    )
+    tmp_dir = tempfile.mkdtemp()
 
     zip_path = os.path.join(
         tmp_dir,
@@ -219,308 +296,288 @@ async def list_zip(
 
     try:
 
-        # ---------------------------------------------
-        # Lưu ZIP
-        # ---------------------------------------------
-
         data = await file.read()
 
         with open(zip_path, "wb") as f:
             f.write(data)
 
-        # ---------------------------------------------
-        # Kiểm tra ZIP
-        # ---------------------------------------------
+    except Exception as e:
 
-        if not zipfile.is_zipfile(zip_path):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Không thể lưu ZIP",
+                "detail": str(e)
+            }
+        )
 
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "File upload không phải ZIP"
-                }
-            )
+    if not zipfile.is_zipfile(zip_path):
 
-        # ---------------------------------------------
-        # Đọc ZIP
-        # ---------------------------------------------
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "File upload không phải ZIP"
+            }
+        )
+
+    try:
 
         with zipfile.ZipFile(
             zip_path,
             "r"
         ) as z:
 
-            all_files = z.namelist()
+            names = z.namelist()
 
-            z.extractall(tmp_dir)
-
-        # ---------------------------------------------
-        # Tìm Word
-        # ---------------------------------------------
-
-        word_files = find_word_files(
-            tmp_dir
-        )
-
-        return {
-            "zip": file.filename,
-            "total_files": len(all_files),
-
-            "word_files": [
-                {
-                    "filename": x["filename"],
-                    "path": x["relative"]
-                }
-                for x in word_files
-            ],
-
-            "all_files": all_files
-        }
+            z.extractall(
+                tmp_dir
+            )
 
     except Exception as e:
 
         return JSONResponse(
             status_code=500,
             content={
-                "error": "Lỗi khi xử lý ZIP",
+                "error": "Không thể giải nén ZIP",
                 "detail": str(e)
             }
         )
+
+    word_files = find_word_files(
+        tmp_dir
+    )
+
+    return {
+        "zip": file.filename,
+        "total_files": len(names),
+
+        "word_files": [
+            {
+                "filename": x["filename"],
+                "path": x["relative"]
+            }
+            for x in word_files
+        ],
+
+        "all_files": names
+    }
 
 
 # =========================================================
 # EXTRACT
 #
 # /extract?kind=ktmt
+#
 # /extract?kind=canbo
+#
+# QUAN TRỌNG:
+# File trả về luôn có tên ASCII:
+#
+# ktmt.doc
+# canbo.doc
+#
+# để tránh lỗi latin-1 với tên tiếng Việt.
 # =========================================================
 
 @app.post("/extract")
 async def extract(
     file: UploadFile = File(...),
-    kind: str = "ktmt"
+    kind: str = Query(
+        default="ktmt"
+    )
 ):
 
-    tmp_dir = tempfile.mkdtemp(
-        prefix="ktmt_extract_"
-    )
+    tmp_dir = tempfile.mkdtemp()
 
     zip_path = os.path.join(
         tmp_dir,
         "input.zip"
     )
 
-    try:
+    # =====================================================
+    # 1. LƯU ZIP
+    # =====================================================
 
-        # =================================================
-        # 1. NHẬN FILE
-        # =================================================
+    try:
 
         data = await file.read()
 
-        if not data:
+        with open(
+            zip_path,
+            "wb"
+        ) as f:
 
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "File ZIP rỗng"
-                }
-            )
-
-        with open(zip_path, "wb") as f:
             f.write(data)
 
-
-        # =================================================
-        # 2. KIỂM TRA ZIP
-        # =================================================
-
-        if not zipfile.is_zipfile(zip_path):
-
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "File upload không phải ZIP"
-                }
-            )
-
-
-        # =================================================
-        # 3. GIẢI NÉN
-        # =================================================
-
-        try:
-
-            with zipfile.ZipFile(
-                zip_path,
-                "r"
-            ) as z:
-
-                names = z.namelist()
-
-                z.extractall(tmp_dir)
-
-        except Exception as e:
-
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": "Không thể giải nén ZIP",
-                    "detail": str(e)
-                }
-            )
-
-
-        # =================================================
-        # 4. TÌM FILE WORD
-        # =================================================
-
-        word_files = find_word_files(
-            tmp_dir
-        )
-
-
-        if not word_files:
-
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": "Không tìm thấy file DOC/DOCX",
-                    "all_files": names
-                }
-            )
-
-
-        # =================================================
-        # 5. CHỌN FILE
-        # =================================================
-
-        kind_normalized = normalize_text(
-            kind
-        )
-
-
-        # ---------------------------------------------
-        # LỊCH KIỂM TRA
-        # ---------------------------------------------
-
-        if kind_normalized == "ktmt":
-
-            target = find_ktmt_file(
-                word_files
-            )
-
-            selected_type = "LICH KIEM TRA"
-
-
-        # ---------------------------------------------
-        # CÁN BỘ TRỰC
-        # ---------------------------------------------
-
-        elif kind_normalized == "canbo":
-
-            target = find_canbo_file(
-                word_files
-            )
-
-            selected_type = "CAN BO TRUC"
-
-
-        else:
-
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "kind không hợp lệ",
-                    "kind": kind,
-                    "allowed": [
-                        "ktmt",
-                        "canbo"
-                    ]
-                }
-            )
-
-
-        # =================================================
-        # 6. KHÔNG TÌM THẤY
-        # =================================================
-
-        if target is None:
-
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": "Không tìm thấy file yêu cầu",
-
-                    "kind": kind,
-
-                    "word_files": [
-                        {
-                            "filename": x["filename"],
-                            "path": x["relative"]
-                        }
-                        for x in word_files
-                    ]
-                }
-            )
-
-
-        # =================================================
-        # 7. COPY FILE RA NGOÀI
-        #
-        # Để FileResponse chắc chắn đọc được file
-        # =================================================
-
-        output_dir = tempfile.mkdtemp(
-            prefix="ktmt_output_"
-        )
-
-        output_path = os.path.join(
-            output_dir,
-            target["filename"]
-        )
-
-        shutil.copy2(
-            target["path"],
-            output_path
-        )
-
-
-        # =================================================
-        # 8. TRẢ FILE
-        # =================================================
-
-        return FileResponse(
-
-            path=output_path,
-
-            filename=target["filename"],
-
-            media_type=(
-                "application/msword"
-                if target["filename"].lower().endswith(".doc")
-                else
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            ),
-
-            headers={
-                "X-Selected-Type": selected_type,
-                "X-Selected-File": target["filename"]
-            }
-        )
-
-
     except Exception as e:
-
-        # =================================================
-        # BẮT MỌI LỖI ĐỂ KHÔNG CÒN "Internal Server Error"
-        # MÀ KHÔNG BIẾT NGUYÊN NHÂN
-        # =================================================
 
         return JSONResponse(
             status_code=500,
             content={
-                "error": "Internal Server Error",
+                "error": "Không thể lưu ZIP",
+                "detail": str(e),
+                "kind": kind
+            }
+        )
+
+
+    # =====================================================
+    # 2. KIỂM TRA ZIP
+    # =====================================================
+
+    if not zipfile.is_zipfile(zip_path):
+
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "File upload không phải ZIP",
+                "kind": kind
+            }
+        )
+
+
+    # =====================================================
+    # 3. GIẢI NÉN
+    # =====================================================
+
+    try:
+
+        with zipfile.ZipFile(
+            zip_path,
+            "r"
+        ) as z:
+
+            z.extractall(
+                tmp_dir
+            )
+
+    except Exception as e:
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Không thể giải nén ZIP",
+                "detail": str(e),
+                "kind": kind
+            }
+        )
+
+
+    # =====================================================
+    # 4. TÌM WORD
+    # =====================================================
+
+    word_files = find_word_files(
+        tmp_dir
+    )
+
+    if not word_files:
+
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "Không tìm thấy file Word",
+                "kind": kind
+            }
+        )
+
+
+    # =====================================================
+    # 5. CHỌN FILE
+    # =====================================================
+
+    target = find_target_file(
+        word_files,
+        kind
+    )
+
+
+    if target is None:
+
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "Không tìm được file yêu cầu",
+                "kind": kind,
+
+                "word_files": [
+                    {
+                        "filename": x["filename"],
+                        "path": x["relative"]
+                    }
+                    for x in word_files
+                ]
+            }
+        )
+
+
+    # =====================================================
+    # 6. CHỌN TÊN ASCII CHO FILE TRẢ VỀ
+    # =====================================================
+
+    if normalize_text(kind) == "ktmt":
+
+        output_name = "ktmt.doc"
+
+    else:
+
+        output_name = "canbo.doc"
+
+
+    # =====================================================
+    # 7. LOG SERVER
+    # =====================================================
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "ZIP:",
+        file.filename
+    )
+
+    print(
+        "KIND:",
+        kind
+    )
+
+    print(
+        "SELECTED:",
+        target["filename"]
+    )
+
+    print(
+        "OUTPUT:",
+        output_name
+    )
+
+    print(
+        "======================================"
+    )
+
+
+    # =====================================================
+    # 8. TRẢ FILE
+    #
+    # KHÔNG gửi filename tiếng Việt.
+    # Đây chính là phần sửa lỗi latin-1.
+    # =====================================================
+
+    try:
+
+        return FileResponse(
+            path=target["path"],
+            filename=output_name,
+            media_type="application/octet-stream"
+        )
+
+    except Exception as e:
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Không thể trả file",
                 "detail": str(e),
                 "kind": kind
             }
