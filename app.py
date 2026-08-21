@@ -1,446 +1,515 @@
 import os
-import re
 import io
-import json
+import re
+import base64
 import zipfile
-import tempfile
-import shutil
+import unicodedata
 from flask import Flask, request, jsonify
+
 
 app = Flask(__name__)
 
-# ============================================================
-# CẤU HÌNH
-# ============================================================
-
-ALLOWED_EXTENSIONS = {
-    ".doc",
-    ".docx"
-}
 
 # ============================================================
-# HÀM CHUẨN HÓA TÊN
+# CONFIG
+# ============================================================
+
+MAX_FILE_SIZE_MB = 100
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+# ============================================================
+# NORMALIZE TEXT
 # ============================================================
 
 def normalize_text(text):
-    if not text:
+    """
+    Chuyển:
+        "Lịch cán bộ trực"
+    thành:
+        "lich can bo truc"
+
+    Giúp nhận diện tên file không phụ thuộc dấu tiếng Việt.
+    """
+
+    if text is None:
         return ""
 
-    text = str(text)
+    text = str(text).strip().lower()
 
-    # chuẩn hóa Unicode
-    import unicodedata
-    text = unicodedata.normalize("NFC", text)
+    text = unicodedata.normalize(
+        "NFD",
+        text
+    )
 
-    # bỏ khoảng trắng thừa
-    text = re.sub(r"\s+", " ", text)
+    text = "".join(
+        c
+        for c in text
+        if unicodedata.category(c) != "Mn"
+    )
 
-    return text.strip()
+    return text
 
 
 # ============================================================
-# NHẬN DIỆN LOẠI FILE
+# DETECT FILE TYPE
 # ============================================================
 
-def detect_kind(filename):
+def detect_file_kind(filename):
+    """
+    Phân loại file thành:
+        ktmt
+        canbo
+        unknown
+    """
 
-    name = normalize_text(
-        os.path.basename(filename)
-    ).lower()
+    name = normalize_text(filename)
 
-    # --------------------------------------------
-    # FILE KTMT
-    # --------------------------------------------
+    # --------------------------------------------------------
+    # CÁN BỘ TRỰC
+    # --------------------------------------------------------
 
-    if (
-        "ktmt" in name
-        or "kiểm tra mục tiêu" in name
-        or "kiem tra muc tieu" in name
-    ):
-        return "ktmt"
+    canbo_keywords = [
+        "can bo truc",
+        "canbotruc",
+        "truc can bo",
+        "lich can bo",
+        "lich truc",
+        "lichtruc",
+        "truc ban",
+        "trucban",
+        "chi huy",
+        "canbo",
+    ]
 
-    # --------------------------------------------
-    # FILE CÁN BỘ TRỰC
-    # --------------------------------------------
+    for keyword in canbo_keywords:
+        if keyword in name:
+            return "canbo"
 
-    if (
-        "lịch công tác" in name
-        or "lich cong tac" in name
-        or "cán bộ trực" in name
-        or "can bo truc" in name
-        or "lịch trực" in name
-        or "lich truc" in name
-    ):
-        return "canbo"
+
+    # --------------------------------------------------------
+    # KTMT
+    # --------------------------------------------------------
+
+    ktmt_keywords = [
+        "ktmt",
+        "kiem tra",
+        "kiemtra",
+        "muc tieu",
+        "muctieu",
+        "lich ktmt",
+        "lich kiem tra",
+    ]
+
+    for keyword in ktmt_keywords:
+        if keyword in name:
+            return "ktmt"
+
 
     return "unknown"
 
 
 # ============================================================
-# LẤY KHOẢNG NGÀY TỪ TÊN FILE
-#
-# Hỗ trợ:
-#
-# 24.8 đến 30.8.2026
-# 31.8 đến 06.9.2026
-# Từ 24.8 đến ngày 30.8.2026
-#
+# DETECT DATE RANGE FROM FILE NAME
 # ============================================================
 
 def extract_date_range(filename):
+    """
+    Cố gắng lấy khoảng ngày từ tên file.
 
-    name = normalize_text(
-        os.path.basename(filename)
-    )
+    Ví dụ:
+        Lịch trực và ktmt từ 24.8 đến 06.9.2026.docx
 
-    # --------------------------------------------
-    # Dạng:
-    #
-    # 24.8 đến 30.8.2026
-    # --------------------------------------------
-
-    pattern1 = re.search(
-        r"(\d{1,2})[./-](\d{1,2})"
-        r"\s*(?:đến|den|-|→|–)\s*"
-        r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
-        name,
-        re.IGNORECASE
-    )
-
-    if pattern1:
-
-        d1 = int(pattern1.group(1))
-        m1 = int(pattern1.group(2))
-
-        d2 = int(pattern1.group(3))
-        m2 = int(pattern1.group(4))
-
-        year = int(pattern1.group(5))
-
-        return {
-            "from": f"{d1:02d}/{m1:02d}/{year}",
-            "to": f"{d2:02d}/{m2:02d}/{year}"
+    trả về:
+        {
+            "start": "24.8",
+            "end": "06.9",
+            "year": "2026"
         }
 
-    # --------------------------------------------
-    # Trường hợp:
-    #
-    # 24.8 đến 30.8
-    #
-    # nhưng năm nằm trước đó
-    # --------------------------------------------
+    Nếu không tìm thấy thì trả về None.
+    """
 
-    pattern2 = re.search(
-        r"(\d{1,2})[./-](\d{1,2})"
-        r"\s*(?:đến|den|-|→|–)\s*"
-        r"(\d{1,2})[./-](\d{1,2})"
-        r"(?:[^\d]|$)",
-        name,
-        re.IGNORECASE
-    )
+    name = normalize_text(filename)
 
-    if pattern2:
+    patterns = [
 
-        d1 = int(pattern2.group(1))
-        m1 = int(pattern2.group(2))
+        # 24.8 đến 06.9.2026
+        r"(\d{1,2})[./-](\d{1,2})\s*(?:den|-|to)\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
 
-        d2 = int(pattern2.group(3))
-        m2 = int(pattern2.group(4))
+        # 24.8 - 06.9.2026
+        r"(\d{1,2})[./-](\d{1,2})\s*[-]\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
 
-        # Tìm năm gần cuối tên
-        years = re.findall(
-            r"(20\d{2})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
             name
         )
 
-        if years:
-
-            year = int(years[-1])
+        if match:
 
             return {
-                "from": f"{d1:02d}/{m1:02d}/{year}",
-                "to": f"{d2:02d}/{m2:02d}/{year}"
+                "start_day": match.group(1),
+                "start_month": match.group(2),
+                "end_day": match.group(3),
+                "end_month": match.group(4),
+                "year": match.group(5)
             }
+
 
     return None
 
 
 # ============================================================
-# KEY GHÉP CẶP
+# CHECK WORD FILE
 # ============================================================
 
-def pair_key(date_range):
+def is_word_file(filename):
 
-    if not date_range:
-        return None
+    name = filename.lower()
 
     return (
-        date_range["from"]
-        + "__"
-        + date_range["to"]
+        name.endswith(".doc") or
+        name.endswith(".docx")
     )
 
 
 # ============================================================
-# CHUYỂN ZIP THÀNH ZIP CHUẨN HÓA
-#
-# Render trả về một ZIP mới.
-#
-# Bên trong:
-#
-# manifest.json
-# KTMT_...
-# CANBO_...
-#
+# READ ZIP
 # ============================================================
 
-def build_normalized_zip(input_bytes):
+def read_zip(zip_bytes):
 
-    input_zip = zipfile.ZipFile(
-        io.BytesIO(input_bytes),
-        "r"
-    )
+    result = []
 
-    records = []
+    with zipfile.ZipFile(
+        io.BytesIO(zip_bytes)
+    ) as z:
 
-    for info in input_zip.infolist():
+        for info in z.infolist():
 
-        if info.is_dir():
-            continue
+            # ------------------------------------------------
+            # Bỏ folder
+            # ------------------------------------------------
 
-        original_name = info.filename
+            if info.is_dir():
+                continue
 
-        # chỉ lấy file Word
-        ext = os.path.splitext(
-            original_name
-        )[1].lower()
 
-        if ext not in ALLOWED_EXTENSIONS:
-            continue
+            filename = info.filename
 
-        basename = os.path.basename(
-            original_name
-        )
 
-        kind = detect_kind(
-            basename
-        )
+            # ------------------------------------------------
+            # Chỉ lấy Word
+            # ------------------------------------------------
 
-        date_range = extract_date_range(
-            basename
-        )
+            if not is_word_file(filename):
+                continue
 
-        records.append({
-            "original_name": basename,
-            "kind": kind,
-            "from": (
-                date_range["from"]
-                if date_range else None
-            ),
-            "to": (
-                date_range["to"]
-                if date_range else None
-            ),
-            "zip_name": original_name
-        })
 
-    # ========================================================
-    # NHÓM THEO KHOẢNG NGÀY
-    # ========================================================
+            # ------------------------------------------------
+            # Đọc file
+            # ------------------------------------------------
 
-    pairs = {}
+            data = z.read(
+                info.filename
+            )
 
-    for record in records:
 
-        if record["kind"] == "unknown":
-            continue
+            kind = detect_file_kind(
+                filename
+            )
 
-        if not record["from"] or not record["to"]:
-            continue
 
-        key = (
-            record["from"]
-            + "__"
-            + record["to"]
-        )
+            date_range = extract_date_range(
+                filename
+            )
 
-        if key not in pairs:
 
-            pairs[key] = {
-                "from": record["from"],
-                "to": record["to"],
-                "ktmt": None,
-                "canbo": None
-            }
+            encoded = base64.b64encode(
+                data
+            ).decode("utf-8")
 
-        if record["kind"] == "ktmt":
-            pairs[key]["ktmt"] = record
 
-        elif record["kind"] == "canbo":
-            pairs[key]["canbo"] = record
+            result.append({
 
-    # ========================================================
-    # SẮP XẾP THEO NGÀY
-    # ========================================================
+                "filename": os.path.basename(
+                    filename
+                ),
+
+                "path": filename,
+
+                "kind": kind,
+
+                "size": len(data),
+
+                "date_range": date_range,
+
+                "data": encoded
+
+            })
+
+
+    return result
+
+
+# ============================================================
+# SORT FILES
+# ============================================================
+
+def sort_files(files):
 
     def sort_key(item):
 
-        from datetime import datetime
+        date_range = item.get(
+            "date_range"
+        )
+
+        if not date_range:
+            return (
+                9999,
+                99,
+                99,
+                item.get(
+                    "filename",
+                    ""
+                )
+            )
+
 
         try:
-            return datetime.strptime(
-                item["from"],
-                "%d/%m/%Y"
+
+            year = int(
+                date_range["year"]
             )
+
+            month = int(
+                date_range["start_month"]
+            )
+
+            day = int(
+                date_range["start_day"]
+            )
+
+            return (
+                year,
+                month,
+                day,
+                item.get(
+                    "filename",
+                    ""
+                )
+            )
+
         except Exception:
-            return datetime.max
 
-    pair_list = list(
-        pairs.values()
-    )
-
-    pair_list.sort(
-        key=sort_key
-    )
-
-    # ========================================================
-    # KIỂM TRA
-    # ========================================================
-
-    if len(pair_list) == 0:
-
-        raise Exception(
-            "Không tìm thấy cặp file Word hợp lệ."
-        )
-
-    # ========================================================
-    # TẠO ZIP KẾT QUẢ
-    # ========================================================
-
-    output_buffer = io.BytesIO()
-
-    with zipfile.ZipFile(
-        output_buffer,
-        "w",
-        zipfile.ZIP_DEFLATED
-    ) as output_zip:
-
-        manifest_pairs = []
-
-        for index, pair in enumerate(
-            pair_list,
-            start=1
-        ):
-
-            pair_info = {
-                "index": index,
-                "from": pair["from"],
-                "to": pair["to"],
-                "ktmt": None,
-                "canbo": None
-            }
-
-            # --------------------------------------------
-            # FILE KTMT
-            # --------------------------------------------
-
-            if pair["ktmt"]:
-
-                source_name = (
-                    pair["ktmt"]["zip_name"]
+            return (
+                9999,
+                99,
+                99,
+                item.get(
+                    "filename",
+                    ""
                 )
-
-                content = input_zip.read(
-                    source_name
-                )
-
-                ext = os.path.splitext(
-                    source_name
-                )[1].lower()
-
-                target_name = (
-                    f"PAIR_{index:03d}_KTMT"
-                    + ext
-                )
-
-                output_zip.writestr(
-                    target_name,
-                    content
-                )
-
-                pair_info["ktmt"] = {
-                    "name": target_name,
-                    "original_name": source_name
-                }
-
-            # --------------------------------------------
-            # FILE CÁN BỘ
-            # --------------------------------------------
-
-            if pair["canbo"]:
-
-                source_name = (
-                    pair["canbo"]["zip_name"]
-                )
-
-                content = input_zip.read(
-                    source_name
-                )
-
-                ext = os.path.splitext(
-                    source_name
-                )[1].lower()
-
-                target_name = (
-                    f"PAIR_{index:03d}_CANBO"
-                    + ext
-                )
-
-                output_zip.writestr(
-                    target_name,
-                    content
-                )
-
-                pair_info["canbo"] = {
-                    "name": target_name,
-                    "original_name": source_name
-                }
-
-            manifest_pairs.append(
-                pair_info
             )
 
-        # --------------------------------------------
-        # MANIFEST
-        # --------------------------------------------
 
-        manifest = {
-            "success": True,
-            "pairCount": len(
-                manifest_pairs
-            ),
-            "pairs": manifest_pairs
-        }
-
-        output_zip.writestr(
-            "manifest.json",
-            json.dumps(
-                manifest,
-                ensure_ascii=False,
-                indent=2
-            ).encode("utf-8")
-        )
-
-    output_buffer.seek(0)
-
-    return (
-        output_buffer.getvalue(),
-        manifest
+    return sorted(
+        files,
+        key=sort_key
     )
 
 
 # ============================================================
-# API
+# GROUP FILES INTO PAIRS
+# ============================================================
+
+def group_into_pairs(files):
+
+    ktmt = [
+        x
+        for x in files
+        if x["kind"] == "ktmt"
+    ]
+
+    canbo = [
+        x
+        for x in files
+        if x["kind"] == "canbo"
+    ]
+
+
+    ktmt = sort_files(
+        ktmt
+    )
+
+    canbo = sort_files(
+        canbo
+    )
+
+
+    pairs = []
+
+
+    # --------------------------------------------------------
+    # Ghép theo khoảng ngày
+    # --------------------------------------------------------
+
+    used_canbo = set()
+
+
+    for ktmt_file in ktmt:
+
+        matched_index = None
+
+
+        ktmt_range = ktmt_file.get(
+            "date_range"
+        )
+
+
+        for index, canbo_file in enumerate(
+            canbo
+        ):
+
+            if index in used_canbo:
+                continue
+
+
+            canbo_range = canbo_file.get(
+                "date_range"
+            )
+
+
+            if (
+                ktmt_range is not None and
+                canbo_range is not None
+            ):
+
+                if (
+                    ktmt_range["start_day"] ==
+                    canbo_range["start_day"]
+                    and
+                    ktmt_range["start_month"] ==
+                    canbo_range["start_month"]
+                    and
+                    ktmt_range["end_day"] ==
+                    canbo_range["end_day"]
+                    and
+                    ktmt_range["end_month"] ==
+                    canbo_range["end_month"]
+                    and
+                    ktmt_range["year"] ==
+                    canbo_range["year"]
+                ):
+
+                    matched_index = index
+                    break
+
+
+        # ----------------------------------------------------
+        # Nếu tìm được cặp
+        # ----------------------------------------------------
+
+        if matched_index is not None:
+
+            canbo_file = canbo[
+                matched_index
+            ]
+
+            used_canbo.add(
+                matched_index
+            )
+
+        else:
+
+            canbo_file = None
+
+
+        pairs.append({
+
+            "ktmt": ktmt_file,
+
+            "canbo": canbo_file
+
+        })
+
+
+    # --------------------------------------------------------
+    # Những file cán bộ trực chưa ghép
+    # --------------------------------------------------------
+
+    for index, canbo_file in enumerate(
+        canbo
+    ):
+
+        if index not in used_canbo:
+
+            pairs.append({
+
+                "ktmt": None,
+
+                "canbo": canbo_file
+
+            })
+
+
+    return pairs
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route(
+    "/health",
+    methods=["GET"]
+)
+def health():
+
+    return jsonify({
+
+        "status": "ok",
+
+        "service": "ktmt-import",
+
+        "message": "Render đang hoạt động."
+
+    })
+
+
+# ============================================================
+# HOME
+# ============================================================
+
+@app.route(
+    "/",
+    methods=["GET"]
+)
+def home():
+
+    return jsonify({
+
+        "status": "ok",
+
+        "service": "ktmt-import",
+
+        "endpoints": [
+
+            "GET /health",
+
+            "POST /extract-all"
+
+        ]
+
+    })
+
+
+# ============================================================
+# EXTRACT ALL
 # ============================================================
 
 @app.route(
@@ -451,96 +520,344 @@ def extract_all():
 
     try:
 
+        # ====================================================
+        # KIỂM TRA FILE
+        # ====================================================
+
         if "file" not in request.files:
 
             return jsonify({
+
                 "success": False,
-                "error": "Không có file ZIP."
+
+                "error":
+                    "Không tìm thấy file ZIP trong request."
+
             }), 400
 
-        uploaded_file = (
-            request.files["file"]
-        )
+
+        uploaded_file = request.files[
+            "file"
+        ]
+
+
+        if not uploaded_file:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                    "File upload không hợp lệ."
+
+            }), 400
+
 
         filename = (
             uploaded_file.filename
-            or ""
+            or
+            "upload.zip"
         )
 
-        if not filename.lower().endswith(
-            ".zip"
+
+        # ====================================================
+        # ĐỌC ZIP
+        # ====================================================
+
+        zip_bytes =
+            uploaded_file.read()
+
+
+        if not zip_bytes:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                    "File ZIP rỗng."
+
+            }), 400
+
+
+        if len(zip_bytes) > MAX_FILE_SIZE:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                    "File ZIP vượt quá "
+                    + str(MAX_FILE_SIZE_MB)
+                    + " MB."
+
+            }), 413
+
+
+        # ====================================================
+        # KIỂM TRA ZIP
+        # ====================================================
+
+        try:
+
+            if not zipfile.is_zipfile(
+                io.BytesIO(zip_bytes)
+            ):
+
+                return jsonify({
+
+                    "success": False,
+
+                    "error":
+                        "File gửi lên không phải ZIP hợp lệ."
+
+                }), 400
+
+        except Exception:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                    "Không thể kiểm tra ZIP."
+
+            }), 400
+
+
+        # ====================================================
+        # ĐỌC TOÀN BỘ WORD
+        # ====================================================
+
+        files = read_zip(
+            zip_bytes
+        )
+
+
+        if len(files) == 0:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                    "Không tìm thấy file Word nào trong ZIP.",
+
+                "zip_filename":
+                    filename
+
+            }), 400
+
+
+        # ====================================================
+        # SẮP XẾP
+        # ====================================================
+
+        files = sort_files(
+            files
+        )
+
+
+        # ====================================================
+        # PHÂN LOẠI
+        # ====================================================
+
+        ktmt_files = [
+
+            x
+            for x in files
+            if x["kind"] == "ktmt"
+
+        ]
+
+
+        canbo_files = [
+
+            x
+            for x in files
+            if x["kind"] == "canbo"
+
+        ]
+
+
+        unknown_files = [
+
+            x
+            for x in files
+            if x["kind"] == "unknown"
+
+        ]
+
+
+        # ====================================================
+        # GHÉP CẶP
+        # ====================================================
+
+        pairs = group_into_pairs(
+            files
+        )
+
+
+        # ====================================================
+        # TẠO RESPONSE
+        # ====================================================
+
+        response_pairs = []
+
+
+        for index, pair in enumerate(
+            pairs,
+            start=1
         ):
 
-            return jsonify({
-                "success": False,
-                "error": "File gửi lên không phải ZIP."
-            }), 400
-
-        input_bytes = (
-            uploaded_file.read()
-        )
-
-        if not input_bytes:
-
-            return jsonify({
-                "success": False,
-                "error": "ZIP rỗng."
-            }), 400
-
-        result_zip, manifest = (
-            build_normalized_zip(
-                input_bytes
+            ktmt_file = pair.get(
+                "ktmt"
             )
-        )
+
+            canbo_file = pair.get(
+                "canbo"
+            )
+
+
+            response_pairs.append({
+
+                "pair_index":
+                    index,
+
+                "date_range":
+                    (
+                        ktmt_file.get(
+                            "date_range"
+                        )
+                        if ktmt_file
+                        else
+                        (
+                            canbo_file.get(
+                                "date_range"
+                            )
+                            if canbo_file
+                            else None
+                        )
+                    ),
+
+                "ktmt":
+                    ktmt_file,
+
+                "canbo":
+                    canbo_file
+
+            })
+
 
         # ====================================================
-        # TRẢ VỀ ZIP
+        # LOG
         # ====================================================
 
-        from flask import Response
-
-        response = Response(
-            result_zip,
-            status=200,
-            mimetype="application/zip"
+        print(
+            "======================================"
         )
 
-        response.headers[
-            "Content-Disposition"
-        ] = (
-            "attachment; "
-            'filename="normalized_import.zip"'
+        print(
+            "ZIP: " +
+            filename
         )
 
-        response.headers[
-            "X-Pair-Count"
-        ] = str(
-            manifest["pairCount"]
+        print(
+            "Tổng file Word: " +
+            str(len(files))
         )
 
-        return response
+        print(
+            "KTMT: " +
+            str(len(ktmt_files))
+        )
+
+        print(
+            "Cán bộ trực: " +
+            str(len(canbo_files))
+        )
+
+        print(
+            "Không xác định: " +
+            str(len(unknown_files))
+        )
+
+        print(
+            "Số cặp: " +
+            str(len(response_pairs))
+        )
+
+        print(
+            "======================================"
+        )
+
+
+        # ====================================================
+        # RESPONSE
+        # ====================================================
+
+        return jsonify({
+
+            "success": True,
+
+            "zip_filename":
+                filename,
+
+            "total_word_files":
+                len(files),
+
+            "total_ktmt":
+                len(ktmt_files),
+
+            "total_canbo":
+                len(canbo_files),
+
+            "total_unknown":
+                len(unknown_files),
+
+            "total_pairs":
+                len(response_pairs),
+
+            "files":
+                files,
+
+            "pairs":
+                response_pairs,
+
+            "unknown_files":
+                unknown_files
+
+        })
+
+
+    except zipfile.BadZipFile:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+                "ZIP bị lỗi hoặc không thể giải nén."
+
+        }), 400
+
 
     except Exception as e:
 
+        print(
+            "ERROR:",
+            repr(e)
+        )
+
+
         return jsonify({
+
             "success": False,
-            "error": str(e)
+
+            "error":
+                str(e)
+
         }), 500
-
-
-# ============================================================
-# API KIỂM TRA
-# ============================================================
-
-@app.route(
-    "/health",
-    methods=["GET"]
-)
-def health():
-
-    return jsonify({
-        "status": "ok"
-    })
 
 
 # ============================================================
@@ -552,9 +869,10 @@ if __name__ == "__main__":
     port = int(
         os.environ.get(
             "PORT",
-            10000
+            "10000"
         )
     )
+
 
     app.run(
         host="0.0.0.0",
