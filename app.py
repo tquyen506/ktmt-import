@@ -4,6 +4,7 @@ import re
 import base64
 import zipfile
 import unicodedata
+
 from flask import Flask, request, jsonify
 
 
@@ -24,12 +25,12 @@ MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 def normalize_text(text):
     """
-    Chuyển:
-        "Lịch cán bộ trực"
-    thành:
-        "lich can bo truc"
+    Chuẩn hóa tiếng Việt để nhận diện tên file.
 
-    Giúp nhận diện tên file không phụ thuộc dấu tiếng Việt.
+    Ví dụ:
+        "Lịch cán bộ trực"
+    ->
+        "lich can bo truc"
     """
 
     if text is None:
@@ -57,7 +58,8 @@ def normalize_text(text):
 
 def detect_file_kind(filename):
     """
-    Phân loại file thành:
+    Phân loại file:
+
         ktmt
         canbo
         unknown
@@ -79,10 +81,12 @@ def detect_file_kind(filename):
         "truc ban",
         "trucban",
         "chi huy",
-        "canbo",
+        "chihuy",
+        "canbo"
     ]
 
     for keyword in canbo_keywords:
+
         if keyword in name:
             return "canbo"
 
@@ -98,10 +102,11 @@ def detect_file_kind(filename):
         "muc tieu",
         "muctieu",
         "lich ktmt",
-        "lich kiem tra",
+        "lich kiem tra"
     ]
 
     for keyword in ktmt_keywords:
+
         if keyword in name:
             return "ktmt"
 
@@ -110,37 +115,52 @@ def detect_file_kind(filename):
 
 
 # ============================================================
-# DETECT DATE RANGE FROM FILE NAME
+# DETECT DATE RANGE
 # ============================================================
 
 def extract_date_range(filename):
     """
-    Cố gắng lấy khoảng ngày từ tên file.
+    Nhận diện khoảng ngày trong tên file.
 
     Ví dụ:
+
         Lịch trực và ktmt từ 24.8 đến 06.9.2026.docx
 
     trả về:
+
         {
-            "start": "24.8",
-            "end": "06.9",
+            "start_day": "24",
+            "start_month": "8",
+            "end_day": "06",
+            "end_month": "9",
             "year": "2026"
         }
-
-    Nếu không tìm thấy thì trả về None.
     """
 
     name = normalize_text(filename)
 
+
     patterns = [
 
+        # ----------------------------------------------------
         # 24.8 đến 06.9.2026
-        r"(\d{1,2})[./-](\d{1,2})\s*(?:den|-|to)\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
+        # ----------------------------------------------------
 
+        r"(\d{1,2})[./-](\d{1,2})"
+        r"\s*(?:den|to|-)"
+        r"\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
+
+
+        # ----------------------------------------------------
         # 24.8 - 06.9.2026
-        r"(\d{1,2})[./-](\d{1,2})\s*[-]\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
+        # ----------------------------------------------------
+
+        r"(\d{1,2})[./-](\d{1,2})"
+        r"\s*-\s*"
+        r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})"
 
     ]
+
 
     for pattern in patterns:
 
@@ -152,11 +172,22 @@ def extract_date_range(filename):
         if match:
 
             return {
-                "start_day": match.group(1),
-                "start_month": match.group(2),
-                "end_day": match.group(3),
-                "end_month": match.group(4),
-                "year": match.group(5)
+
+                "start_day":
+                    match.group(1),
+
+                "start_month":
+                    match.group(2),
+
+                "end_day":
+                    match.group(3),
+
+                "end_month":
+                    match.group(4),
+
+                "year":
+                    match.group(5)
+
             }
 
 
@@ -172,7 +203,8 @@ def is_word_file(filename):
     name = filename.lower()
 
     return (
-        name.endswith(".doc") or
+        name.endswith(".doc")
+        or
         name.endswith(".docx")
     )
 
@@ -185,9 +217,11 @@ def read_zip(zip_bytes):
 
     result = []
 
+
     with zipfile.ZipFile(
         io.BytesIO(zip_bytes)
     ) as z:
+
 
         for info in z.infolist():
 
@@ -236,19 +270,25 @@ def read_zip(zip_bytes):
 
             result.append({
 
-                "filename": os.path.basename(
-                    filename
-                ),
+                "filename":
+                    os.path.basename(
+                        filename
+                    ),
 
-                "path": filename,
+                "path":
+                    filename,
 
-                "kind": kind,
+                "kind":
+                    kind,
 
-                "size": len(data),
+                "size":
+                    len(data),
 
-                "date_range": date_range,
+                "date_range":
+                    date_range,
 
-                "data": encoded
+                "data":
+                    encoded
 
             })
 
@@ -268,7 +308,9 @@ def sort_files(files):
             "date_range"
         )
 
+
         if not date_range:
+
             return (
                 9999,
                 99,
@@ -276,23 +318,30 @@ def sort_files(files):
                 item.get(
                     "filename",
                     ""
-                )
+                ).lower()
             )
 
 
         try:
 
             year = int(
-                date_range["year"]
+                date_range[
+                    "year"
+                ]
             )
 
             month = int(
-                date_range["start_month"]
+                date_range[
+                    "start_month"
+                ]
             )
 
             day = int(
-                date_range["start_day"]
+                date_range[
+                    "start_day"
+                ]
             )
+
 
             return (
                 year,
@@ -301,8 +350,9 @@ def sort_files(files):
                 item.get(
                     "filename",
                     ""
-                )
+                ).lower()
             )
+
 
         except Exception:
 
@@ -313,7 +363,7 @@ def sort_files(files):
                 item.get(
                     "filename",
                     ""
-                )
+                ).lower()
             )
 
 
@@ -324,44 +374,98 @@ def sort_files(files):
 
 
 # ============================================================
+# DATE RANGE KEY
+# ============================================================
+
+def date_range_key(date_range):
+
+    if not date_range:
+        return None
+
+
+    try:
+
+        return (
+            int(date_range["start_day"]),
+            int(date_range["start_month"]),
+            int(date_range["end_day"]),
+            int(date_range["end_month"]),
+            int(date_range["year"])
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# CHECK SAME DATE RANGE
+# ============================================================
+
+def same_date_range(range1, range2):
+
+    key1 = date_range_key(
+        range1
+    )
+
+    key2 = date_range_key(
+        range2
+    )
+
+
+    if key1 is None or key2 is None:
+        return False
+
+
+    return key1 == key2
+
+
+# ============================================================
 # GROUP FILES INTO PAIRS
 # ============================================================
 
 def group_into_pairs(files):
 
-    ktmt = [
+    ktmt_files = [
+
         x
         for x in files
         if x["kind"] == "ktmt"
+
     ]
 
-    canbo = [
+
+    canbo_files = [
+
         x
         for x in files
         if x["kind"] == "canbo"
+
     ]
 
 
-    ktmt = sort_files(
-        ktmt
+    ktmt_files = sort_files(
+        ktmt_files
     )
 
-    canbo = sort_files(
-        canbo
+
+    canbo_files = sort_files(
+        canbo_files
     )
 
 
     pairs = []
 
 
-    # --------------------------------------------------------
-    # Ghép theo khoảng ngày
-    # --------------------------------------------------------
-
     used_canbo = set()
 
 
-    for ktmt_file in ktmt:
+    # ========================================================
+    # GHÉP TỪNG FILE KTMT VỚI FILE CÁN BỘ CÙNG KHOẢNG NGÀY
+    # ========================================================
+
+    for ktmt_file in ktmt_files:
+
 
         matched_index = None
 
@@ -372,8 +476,9 @@ def group_into_pairs(files):
 
 
         for index, canbo_file in enumerate(
-            canbo
+            canbo_files
         ):
+
 
             if index in used_canbo:
                 continue
@@ -384,39 +489,23 @@ def group_into_pairs(files):
             )
 
 
-            if (
-                ktmt_range is not None and
-                canbo_range is not None
+            if same_date_range(
+                ktmt_range,
+                canbo_range
             ):
 
-                if (
-                    ktmt_range["start_day"] ==
-                    canbo_range["start_day"]
-                    and
-                    ktmt_range["start_month"] ==
-                    canbo_range["start_month"]
-                    and
-                    ktmt_range["end_day"] ==
-                    canbo_range["end_day"]
-                    and
-                    ktmt_range["end_month"] ==
-                    canbo_range["end_month"]
-                    and
-                    ktmt_range["year"] ==
-                    canbo_range["year"]
-                ):
+                matched_index = index
 
-                    matched_index = index
-                    break
+                break
 
 
         # ----------------------------------------------------
-        # Nếu tìm được cặp
+        # Có file cán bộ tương ứng
         # ----------------------------------------------------
 
         if matched_index is not None:
 
-            canbo_file = canbo[
+            canbo_file = canbo_files[
                 matched_index
             ]
 
@@ -431,30 +520,103 @@ def group_into_pairs(files):
 
         pairs.append({
 
-            "ktmt": ktmt_file,
+            "ktmt":
+                ktmt_file,
 
-            "canbo": canbo_file
+            "canbo":
+                canbo_file
 
         })
 
 
-    # --------------------------------------------------------
-    # Những file cán bộ trực chưa ghép
-    # --------------------------------------------------------
+    # ========================================================
+    # FILE CÁN BỘ CHƯA GHÉP
+    # ========================================================
 
     for index, canbo_file in enumerate(
-        canbo
+        canbo_files
     ):
+
 
         if index not in used_canbo:
 
             pairs.append({
 
-                "ktmt": None,
+                "ktmt":
+                    None,
 
-                "canbo": canbo_file
+                "canbo":
+                    canbo_file
 
             })
+
+
+    # ========================================================
+    # SẮP XẾP LẠI CÁC CẶP THEO KHOẢNG NGÀY
+    # ========================================================
+
+    def pair_sort_key(pair):
+
+        source = (
+            pair.get("ktmt")
+            or
+            pair.get("canbo")
+        )
+
+
+        if not source:
+
+            return (
+                9999,
+                99,
+                99
+            )
+
+
+        date_range = source.get(
+            "date_range"
+        )
+
+
+        if not date_range:
+
+            return (
+                9999,
+                99,
+                99
+            )
+
+
+        try:
+
+            return (
+
+                int(
+                    date_range["year"]
+                ),
+
+                int(
+                    date_range["start_month"]
+                ),
+
+                int(
+                    date_range["start_day"]
+                )
+
+            )
+
+        except Exception:
+
+            return (
+                9999,
+                99,
+                99
+            )
+
+
+    pairs.sort(
+        key=pair_sort_key
+    )
 
 
     return pairs
@@ -472,11 +634,14 @@ def health():
 
     return jsonify({
 
-        "status": "ok",
+        "status":
+            "ok",
 
-        "service": "ktmt-import",
+        "service":
+            "ktmt-import",
 
-        "message": "Render đang hoạt động."
+        "message":
+            "Render đang hoạt động."
 
     })
 
@@ -493,11 +658,15 @@ def home():
 
     return jsonify({
 
-        "status": "ok",
+        "status":
+            "ok",
 
-        "service": "ktmt-import",
+        "service":
+            "ktmt-import",
 
         "endpoints": [
+
+            "GET /",
 
             "GET /health",
 
@@ -528,7 +697,8 @@ def extract_all():
 
             return jsonify({
 
-                "success": False,
+                "success":
+                    False,
 
                 "error":
                     "Không tìm thấy file ZIP trong request."
@@ -545,7 +715,8 @@ def extract_all():
 
             return jsonify({
 
-                "success": False,
+                "success":
+                    False,
 
                 "error":
                     "File upload không hợp lệ."
@@ -564,15 +735,15 @@ def extract_all():
         # ĐỌC ZIP
         # ====================================================
 
-        zip_bytes =
-            uploaded_file.read()
+        zip_bytes = uploaded_file.read()
 
 
         if not zip_bytes:
 
             return jsonify({
 
-                "success": False,
+                "success":
+                    False,
 
                 "error":
                     "File ZIP rỗng."
@@ -580,16 +751,27 @@ def extract_all():
             }), 400
 
 
+        # ====================================================
+        # GIỚI HẠN DUNG LƯỢNG
+        # ====================================================
+
         if len(zip_bytes) > MAX_FILE_SIZE:
 
             return jsonify({
 
-                "success": False,
+                "success":
+                    False,
 
                 "error":
-                    "File ZIP vượt quá "
-                    + str(MAX_FILE_SIZE_MB)
-                    + " MB."
+                    (
+                        "File ZIP vượt quá "
+                        +
+                        str(
+                            MAX_FILE_SIZE_MB
+                        )
+                        +
+                        " MB."
+                    )
 
             }), 413
 
@@ -598,29 +780,17 @@ def extract_all():
         # KIỂM TRA ZIP
         # ====================================================
 
-        try:
-
-            if not zipfile.is_zipfile(
-                io.BytesIO(zip_bytes)
-            ):
-
-                return jsonify({
-
-                    "success": False,
-
-                    "error":
-                        "File gửi lên không phải ZIP hợp lệ."
-
-                }), 400
-
-        except Exception:
+        if not zipfile.is_zipfile(
+            io.BytesIO(zip_bytes)
+        ):
 
             return jsonify({
 
-                "success": False,
+                "success":
+                    False,
 
                 "error":
-                    "Không thể kiểm tra ZIP."
+                    "File gửi lên không phải ZIP hợp lệ."
 
             }), 400
 
@@ -638,7 +808,8 @@ def extract_all():
 
             return jsonify({
 
-                "success": False,
+                "success":
+                    False,
 
                 "error":
                     "Không tìm thấy file Word nào trong ZIP.",
@@ -650,7 +821,7 @@ def extract_all():
 
 
         # ====================================================
-        # SẮP XẾP
+        # SẮP XẾP FILE
         # ====================================================
 
         files = sort_files(
@@ -699,7 +870,7 @@ def extract_all():
 
 
         # ====================================================
-        # TẠO RESPONSE
+        # TẠO RESPONSE PAIRS
         # ====================================================
 
         response_pairs = []
@@ -710,12 +881,21 @@ def extract_all():
             start=1
         ):
 
+
             ktmt_file = pair.get(
                 "ktmt"
             )
 
+
             canbo_file = pair.get(
                 "canbo"
+            )
+
+
+            source_file = (
+                ktmt_file
+                or
+                canbo_file
             )
 
 
@@ -726,18 +906,12 @@ def extract_all():
 
                 "date_range":
                     (
-                        ktmt_file.get(
+                        source_file.get(
                             "date_range"
                         )
-                        if ktmt_file
+                        if source_file
                         else
-                        (
-                            canbo_file.get(
-                                "date_range"
-                            )
-                            if canbo_file
-                            else None
-                        )
+                        None
                     ),
 
                 "ktmt":
@@ -758,34 +932,90 @@ def extract_all():
         )
 
         print(
+            "===== EXTRACT ZIP ====="
+        )
+
+        print(
             "ZIP: " +
             filename
         )
 
         print(
             "Tổng file Word: " +
-            str(len(files))
+            str(
+                len(files)
+            )
         )
 
         print(
             "KTMT: " +
-            str(len(ktmt_files))
+            str(
+                len(ktmt_files)
+            )
         )
 
         print(
             "Cán bộ trực: " +
-            str(len(canbo_files))
+            str(
+                len(canbo_files)
+            )
         )
 
         print(
             "Không xác định: " +
-            str(len(unknown_files))
+            str(
+                len(unknown_files)
+            )
         )
 
         print(
             "Số cặp: " +
-            str(len(response_pairs))
+            str(
+                len(response_pairs)
+            )
         )
+
+
+        for pair in response_pairs:
+
+            print(
+                "CẶP " +
+                str(
+                    pair["pair_index"]
+                ) +
+                ": " +
+                str(
+                    pair["date_range"]
+                )
+            )
+
+            if pair["ktmt"]:
+
+                print(
+                    "  KTMT: " +
+                    pair["ktmt"]["filename"]
+                )
+
+            else:
+
+                print(
+                    "  KTMT: KHÔNG CÓ"
+                )
+
+
+            if pair["canbo"]:
+
+                print(
+                    "  CÁN BỘ: " +
+                    pair["canbo"]["filename"]
+                )
+
+            else:
+
+                print(
+                    "  CÁN BỘ: KHÔNG CÓ"
+                )
+
 
         print(
             "======================================"
@@ -798,7 +1028,8 @@ def extract_all():
 
         return jsonify({
 
-            "success": True,
+            "success":
+                True,
 
             "zip_filename":
                 filename,
@@ -834,7 +1065,8 @@ def extract_all():
 
         return jsonify({
 
-            "success": False,
+            "success":
+                False,
 
             "error":
                 "ZIP bị lỗi hoặc không thể giải nén."
@@ -852,7 +1084,8 @@ def extract_all():
 
         return jsonify({
 
-            "success": False,
+            "success":
+                False,
 
             "error":
                 str(e)
